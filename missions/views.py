@@ -1,4 +1,4 @@
-from rest_framework import generics, status, permissions
+from rest_framework import generics, status, permissions, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,13 +8,24 @@ from django.utils.translation import gettext_lazy as _
 from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Mission, Validation, Justificatif
+from .models_common import TypeMission, TypeFrais
+from .models_missions import Budget, Delegation, RapportFinal, HistoriqueMission, WorkflowValidation
+from .models_vehicules import Vehicule, Bareme
 from .serializers import (
     MissionSerializer, MissionCreateSerializer,
     ValidationSerializer, JustificatifSerializer,
     JustificatifValidationSerializer,
-    SignatureFinanciereSerializer, AvanceSerializer, NotificationSerializer
+    SignatureFinanciereSerializer, AvanceSerializer, NotificationSerializer,
+    ServiceSerializer, BudgetSerializer, DelegationSerializer,
+    RapportFinalSerializer, HistoriqueMissionSerializer, WorkflowValidationSerializer,
+    TypeMissionSerializer, TypeFraisSerializer, VehiculeSerializer, BaremeSerializer
 )
 from .services import ValidationService, NotificationService, MissionReturnService
+from .permissions import (
+    CanManageBudget, CanManageService, CanManageDelegation,
+    IsAdminOrReadOnly, CanManageVehicule
+)
+from users.models import Service
 
 
 class MissionListView(generics.ListCreateAPIView):
@@ -52,6 +63,16 @@ class MissionListView(generics.ListCreateAPIView):
         serializer.save(createur=self.request.user)
 
 
+class MissionViewSet(viewsets.ModelViewSet):
+    """Viewset complet pour les opérations CRUD sur les missions"""
+    queryset = Mission.objects.all()
+    serializer_class = MissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return MissionDetailView.get_queryset(self)
+
+
 class MissionDetailView(generics.RetrieveUpdateDestroyAPIView):
     """Vue pour récupérer, modifier et supprimer une mission."""
 
@@ -75,6 +96,29 @@ class MissionDetailView(generics.RetrieveUpdateDestroyAPIView):
             return Mission.objects.filter(createur=user)
 
 
+class ValidationViewSet(viewsets.ModelViewSet):
+    """Viewset pour les opérations CRUD sur les validations"""
+    queryset = Validation.objects.all()
+    serializer_class = ValidationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['statut', 'niveau', 'mission']
+
+    def get_queryset(self):
+        # Un utilisateur ne peut voir que les validations qui le concernent
+        user = self.request.user
+        if user.is_superuser:
+            return self.queryset
+        return self.queryset.filter(
+            models.Q(validateur=user) | 
+            models.Q(mission__createur=user)
+        ).distinct()
+
+    def perform_create(self, serializer):
+        # Définir automatiquement le validateur comme l'utilisateur connecté
+        serializer.save(validateur=self.request.user)
+
+
 class ValidationListView(generics.ListCreateAPIView):
     """Vue pour lister et créer des validations."""
 
@@ -84,16 +128,18 @@ class ValidationListView(generics.ListCreateAPIView):
     filterset_fields = ['statut', 'niveau', 'mission']
 
     def get_queryset(self):
+        # Un utilisateur ne peut voir que les validations qui le concernent
         user = self.request.user
-
-        if user.role == 'ADMIN' or user.role == 'DG':
+        if user.is_superuser:
             return Validation.objects.all()
-        else:
-            # Les utilisateurs voient les validations où ils sont valideurs
-            return Validation.objects.filter(valideur=user)
+        return Validation.objects.filter(
+            models.Q(validateur=user) | 
+            models.Q(mission__createur=user)
+        ).distinct()
 
     def perform_create(self, serializer):
-        serializer.save(valideur=self.request.user)
+        # Définir automatiquement le validateur comme l'utilisateur connecté
+        serializer.save(validateur=self.request.user)
 
 
 class ValidationDetailView(generics.RetrieveUpdateAPIView):
@@ -176,6 +222,35 @@ class ValidateMissionView(APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class JustificatifViewSet(viewsets.ModelViewSet):
+    """Viewset pour les opérations CRUD sur les justificatifs"""
+    queryset = Justificatif.objects.all()
+    serializer_class = JustificatifSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['statut', 'type', 'mission', 'intervenant']
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role == 'ADMIN' or user.role == 'DG':
+            return self.queryset
+        elif user.can_validate:
+            # Les validateurs voient les justificatifs de leur équipe
+            if user.role == 'CHEF_AGENCE':
+                team_members = [user.id] + [sub.id for sub in user.get_subordinates()]
+                return self.queryset.filter(intervenant__in=team_members)
+            else:
+                # Autres validateurs voient tout
+                return self.queryset
+        else:
+            # Les intervenants voient seulement leurs justificatifs
+            return self.queryset.filter(intervenant=user)
+
+    def perform_create(self, serializer):
+        serializer.save(intervenant=self.request.user)
 
 
 class JustificatifListView(generics.ListCreateAPIView):
@@ -710,114 +785,233 @@ class NotificationListView(generics.ListAPIView):
         return super().list(request, *args, **kwargs)
 
 
-class SignatureListView(generics.ListAPIView):
-    """Vue pour lister les signatures en attente."""
+# ========== NOUVELLES VUES POUR LES MODULES COMPLÉMENTAIRES ==========
 
-    serializer_class = SignatureFinanciereSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        user = self.request.user
-        statut_filter = self.request.query_params.get('statut', 'EN_ATTENTE')
-
-        return SignatureFinanciere.objects.filter(
-            signataire=user,
-            statut=statut_filter
-        ).order_by('ordre')
-
-
-class AvanceListCreateView(generics.ListCreateAPIView):
-    """Vue pour lister et créer des avances."""
-
-    permission_classes = [permissions.IsAuthenticated]
+class ServiceListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des services."""
+    queryset = Service.objects.all()
+    serializer_class = ServiceSerializer
+    permission_classes = [CanManageService]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['mission', 'beneficiaire', 'statut']
+    filterset_fields = ['actif', 'chef']
 
-    def get_serializer_class(self):
-        if self.request.method == 'POST':
-            return AvanceCreateSerializer
-        return AvanceSerializer
+
+class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un service."""
+    queryset = Service.objects.all()
+    serializer_class = ServiceSerializer
+    permission_classes = [CanManageService]
+
+
+class BudgetListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des budgets."""
+    queryset = Budget.objects.all()
+    serializer_class = BudgetSerializer
+    permission_classes = [CanManageBudget]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['annee']
+
+
+class BudgetDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un budget."""
+    queryset = Budget.objects.all()
+    serializer_class = BudgetSerializer
+    permission_classes = [CanManageBudget]
+
+
+class DelegationListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des délégations."""
+    serializer_class = DelegationSerializer
+    permission_classes = [CanManageDelegation]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['delegant', 'delegataire', 'active']
 
     def get_queryset(self):
         user = self.request.user
-
-        # Les comptables voient toutes les avances
-        if user.role == 'COMPTABLE':
-            return Avance.objects.all()
-
-        # Les autres voient seulement leurs avances (en tant que bénéficiaire)
-        return Avance.objects.filter(beneficiaire=user)
+        if user.role in ['ADMIN', 'DG']:
+            return Delegation.objects.all()
+        return Delegation.objects.filter(
+            models.Q(delegant=user) | models.Q(delegataire=user)
+        )
 
     def perform_create(self, serializer):
-        # Vérifier que l'utilisateur est comptable
-        if self.request.user.role != 'COMPTABLE':
-            raise serializers.ValidationError(
-                "Seuls les comptables peuvent créer des avances."
-            )
+        serializer.save(delegant=self.request.user)
 
-        # Vérifier que la mission a toutes les signatures
-        mission = serializer.validated_data['mission']
-        if not mission.signatures_completes:
-            raise serializers.ValidationError(
-                "La mission doit avoir toutes les signatures financières avant de verser une avance."
-            )
 
-        serializer.save(
-            verse_par=self.request.user,
-            beneficiaire=mission.createur  # L'agent est le bénéficiaire par défaut
+class DelegationDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer une délégation."""
+    serializer_class = DelegationSerializer
+    permission_classes = [CanManageDelegation]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role in ['ADMIN', 'DG']:
+            return Delegation.objects.all()
+        return Delegation.objects.filter(
+            models.Q(delegant=user) | models.Q(delegataire=user)
         )
 
 
-class AvanceDetailView(generics.RetrieveUpdateAPIView):
-    """Vue pour consulter et mettre à jour une avance."""
+class RapportFinalListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des rapports finaux."""
+    serializer_class = RapportFinalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['mission', 'valide']
 
-    serializer_class = AvanceSerializer
+    def get_queryset(self):
+        user = self.request.user
+        if user.role in ['ADMIN', 'DG', 'RH']:
+            return RapportFinal.objects.all()
+        return RapportFinal.objects.filter(mission__createur=user)
+
+
+class RapportFinalDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un rapport final."""
+    serializer_class = RapportFinalSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-
-        # Les comptables voient toutes les avances
-        if user.role == 'COMPTABLE':
-            return Avance.objects.all()
-
-        # Les autres voient seulement leurs avances
-        return Avance.objects.filter(beneficiaire=user)
-
-    def perform_update(self, serializer):
-        # Seuls les comptables peuvent mettre à jour les avances
-        if self.request.user.role != 'COMPTABLE':
-            raise serializers.ValidationError(
-                "Seuls les comptables peuvent modifier les avances."
-            )
-
-        # Mettre à jour le statut de la mission si nécessaire
-        avance = self.instance
-        new_statut = serializer.validated_data.get('statut')
-
-        if new_statut == 'VERSEEE' and avance.statut != 'VERSEEE':
-            # Notifier l'agent que l'avance a été versée
-            NotificationService.notify_payment_made(avance.mission, avance)
-
-        serializer.save()
+        if user.role in ['ADMIN', 'DG', 'RH']:
+            return RapportFinal.objects.all()
+        return RapportFinal.objects.filter(mission__createur=user)
 
 
-class NotificationListView(generics.ListAPIView):
-    """Vue pour lister les notifications de l'utilisateur."""
-
-    serializer_class = NotificationSerializer
+class RapportFinalValidateView(APIView):
+    """Vue pour valider un rapport final (RH uniquement)."""
     permission_classes = [permissions.IsAuthenticated]
 
+    def post(self, request, pk):
+        try:
+            rapport = RapportFinal.objects.get(pk=pk)
+            if request.user.role not in ['RH', 'ADMIN', 'DG']:
+                return Response(
+                    {'error': 'Seuls les utilisateurs RH peuvent valider les rapports'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            decision = request.data.get('decision')
+            commentaires = request.data.get('commentaires', '')
+
+            if decision not in ['VALIDE', 'REJETE']:
+                return Response(
+                    {'error': 'Décision invalide'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if decision == 'VALIDE':
+                rapport.valide = True
+                rapport.valide_par = request.user
+                rapport.date_validation = timezone.now()
+                rapport.commentaires = commentaires
+                rapport.save()
+                return Response({'message': 'Rapport validé', 'rapport': RapportFinalSerializer(rapport).data})
+            else:
+                rapport.commentaires = commentaires
+                rapport.save()
+                return Response({'message': 'Rapport rejeté', 'rapport': RapportFinalSerializer(rapport).data})
+
+        except RapportFinal.DoesNotExist:
+            return Response({'error': 'Rapport non trouvé'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class HistoriqueMissionListView(generics.ListAPIView):
+    """Vue pour lister l'historique des missions."""
+    serializer_class = HistoriqueMissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['mission', 'utilisateur']
+
     def get_queryset(self):
-        return Notification.objects.filter(
-            destinataire=self.request.user
-        ).order_by('-date_creation')
+        user = self.request.user
+        mission_id = self.request.query_params.get('mission_id')
+        
+        if user.role in ['ADMIN', 'DG']:
+            queryset = HistoriqueMission.objects.all()
+        else:
+            queryset = HistoriqueMission.objects.filter(mission__createur=user)
+        
+        if mission_id:
+            queryset = queryset.filter(mission_id=mission_id)
+        return queryset
 
-    def list(self, request, *args, **kwargs):
-        # Marquer toutes les notifications comme lues lors de la consultation
-        Notification.objects.filter(
-            destinataire=request.user,
-            lue=False
-        ).update(lue=True, date_lecture=timezone.now())
 
-        return super().list(request, *args, **kwargs)
+class WorkflowValidationListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des configurations de workflow."""
+    queryset = WorkflowValidation.objects.all()
+    serializer_class = WorkflowValidationSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['type_mission', 'actif']
+
+
+class WorkflowValidationDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer une configuration de workflow."""
+    queryset = WorkflowValidation.objects.all()
+    serializer_class = WorkflowValidationSerializer
+    permission_classes = [IsAdminOrReadOnly]
+
+
+class TypeMissionListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des types de mission."""
+    queryset = TypeMission.objects.all()
+    serializer_class = TypeMissionSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['actif']
+
+
+class TypeMissionDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un type de mission."""
+    queryset = TypeMission.objects.all()
+    serializer_class = TypeMissionSerializer
+    permission_classes = [IsAdminOrReadOnly]
+
+
+class TypeFraisListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des types de frais."""
+    queryset = TypeFrais.objects.all()
+    serializer_class = TypeFraisSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['actif', 'remboursable']
+
+
+class TypeFraisDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un type de frais."""
+    queryset = TypeFrais.objects.all()
+    serializer_class = TypeFraisSerializer
+    permission_classes = [IsAdminOrReadOnly]
+
+
+class VehiculeListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des véhicules."""
+    queryset = Vehicule.objects.all()
+    serializer_class = VehiculeSerializer
+    permission_classes = [CanManageVehicule]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['disponible', 'type']
+
+
+class VehiculeDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un véhicule."""
+    queryset = Vehicule.objects.all()
+    serializer_class = VehiculeSerializer
+    permission_classes = [CanManageVehicule]
+
+
+class BaremeListCreateView(generics.ListCreateAPIView):
+    """Vue pour lister et créer des barèmes kilométriques."""
+    queryset = Bareme.objects.all()
+    serializer_class = BaremeSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['actif', 'fonction']
+
+
+class BaremeDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Vue pour consulter, modifier et supprimer un barème."""
+    queryset = Bareme.objects.all()
+    serializer_class = BaremeSerializer
+    permission_classes = [IsAdminOrReadOnly]

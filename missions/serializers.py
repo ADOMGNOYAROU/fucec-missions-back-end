@@ -4,6 +4,10 @@ from .models import (
     Mission, Validation, Justificatif, MissionIntervenant,
     SignatureFinanciere, Ticket, Avance, Depense, EtatDepenses, Notification
 )
+from .models_common import TypeMission, TypeFrais
+from .models_missions import Budget, Delegation, HistoriqueMission, OrdreMission, RapportFinal, WorkflowValidation
+from .models_vehicules import Vehicule, Bareme
+from users.models import User, Entite, Service, UserRole
 
 
 class MissionIntervenantSerializer(serializers.ModelSerializer):
@@ -33,8 +37,8 @@ class MissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mission
         fields = [
-            'id', 'reference', 'titre', 'description', 'type', 'statut',
-            'date_debut', 'date_fin', 'lieu_mission', 'budget_estime', 'avance_demandee',
+            'id', 'reference', 'titre', 'description', 'objet_mission', 'type', 'statut',
+            'date_debut', 'date_fin', 'lieu_mission', 'moyen_transport', 'budget_estime', 'avance_demandee',
             'createur', 'createur_nom', 'participants',
             'intervenants_details', 'intervenants_count', 'duree',
             'date_creation',
@@ -91,8 +95,8 @@ class MissionCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mission
         fields = [
-            'titre', 'description', 'type',
-            'date_debut', 'date_fin', 'lieu_mission', 'budget_estime', 'avance_demandee',
+            'titre', 'description', 'objet_mission', 'type',
+            'date_debut', 'date_fin', 'lieu_mission', 'moyen_transport', 'budget_estime', 'avance_demandee',
             'participants'
         ]
 
@@ -306,3 +310,157 @@ class AvanceCreateSerializer(serializers.ModelSerializer):
             except Mission.DoesNotExist:
                 pass
         return value
+
+
+# ========== NOUVEAUX SERIALIZERS POUR LES MODÈLES COMPLÉMENTAIRES ==========
+
+class ServiceSerializer(serializers.ModelSerializer):
+    """Serializer pour les services/départements."""
+    chef_nom = serializers.CharField(source='chef.get_full_name', read_only=True)
+    nombre_employes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'code', 'nom', 'description', 'chef', 'chef_nom',
+            'budget_annuel', 'actif', 'nombre_employes', 'date_creation'
+        ]
+        read_only_fields = ['id', 'date_creation']
+
+    def get_nombre_employes(self, obj):
+        return obj.employes.count() if hasattr(obj, 'employes') else 0
+
+
+class BudgetSerializer(serializers.ModelSerializer):
+    """Serializer pour les budgets annuels."""
+
+    class Meta:
+        model = Budget
+        fields = [
+            'id', 'annee', 'montant', 'description',
+            'date_creation', 'date_mise_a_jour'
+        ]
+        read_only_fields = ['id', 'date_creation', 'date_mise_a_jour']
+
+
+class DelegationSerializer(serializers.ModelSerializer):
+    """Serializer pour les délégations de pouvoir."""
+    delegant_nom = serializers.CharField(source='delegant.get_full_name', read_only=True)
+    delegataire_nom = serializers.CharField(source='delegataire.get_full_name', read_only=True)
+    est_active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Delegation
+        fields = [
+            'id', 'delegant', 'delegant_nom', 'delegataire', 'delegataire_nom',
+            'date_debut', 'date_fin', 'active', 'est_active', 'commentaire', 'date_creation'
+        ]
+        read_only_fields = ['id', 'date_creation']
+
+    def get_est_active(self, obj):
+        """Vérifie si la délégation est actuellement active."""
+        from django.utils import timezone
+        now = timezone.now().date()
+        return obj.active and obj.date_debut <= now <= obj.date_fin
+
+
+class RapportFinalSerializer(serializers.ModelSerializer):
+    """Serializer pour les rapports finaux de mission."""
+    mission_titre = serializers.CharField(source='mission.titre', read_only=True)
+    valide_par_nom = serializers.CharField(source='valide_par.get_full_name', read_only=True)
+
+    class Meta:
+        model = RapportFinal
+        fields = [
+            'id', 'mission', 'mission_titre', 'contenu', 'date_soumission',
+            'valide', 'valide_par', 'valide_par_nom', 'date_validation', 'commentaires'
+        ]
+        read_only_fields = ['id', 'date_soumission']
+
+
+class HistoriqueMissionSerializer(serializers.ModelSerializer):
+    """Serializer pour l'historique des missions."""
+    utilisateur_nom = serializers.CharField(source='utilisateur.get_full_name', read_only=True)
+    mission_titre = serializers.CharField(source='mission.titre', read_only=True)
+
+    class Meta:
+        model = HistoriqueMission
+        fields = [
+            'id', 'mission', 'mission_titre', 'utilisateur', 'utilisateur_nom',
+            'action', 'details', 'date_action'
+        ]
+        read_only_fields = ['id', 'date_action']
+
+
+class WorkflowValidationSerializer(serializers.ModelSerializer):
+    """Serializer pour les étapes de validation configurables."""
+    type_mission_libelle = serializers.CharField(source='type_mission.libelle', read_only=True)
+
+    class Meta:
+        model = WorkflowValidation
+        fields = [
+            'id', 'type_mission', 'type_mission_libelle', 'niveau',
+            'role_validation', 'actif', 'date_creation'
+        ]
+        read_only_fields = ['id', 'date_creation']
+
+
+class TypeMissionSerializer(serializers.ModelSerializer):
+    """Serializer pour les types de mission."""
+
+    class Meta:
+        model = TypeMission
+        fields = ['id', 'code', 'libelle', 'description', 'actif']
+        read_only_fields = ['id']
+
+
+class TypeFraisSerializer(serializers.ModelSerializer):
+    """Serializer pour les types de frais."""
+
+    class Meta:
+        model = TypeFrais
+        fields = [
+            'id', 'code', 'libelle', 'description',
+            'plafond', 'remboursable', 'actif'
+        ]
+        read_only_fields = ['id']
+
+
+class VehiculeSerializer(serializers.ModelSerializer):
+    """Serializer pour les véhicules."""
+
+    class Meta:
+        model = Vehicule
+        fields = [
+            'id', 'immatriculation', 'marque', 'modele', 'type',
+            'disponible', 'kilometrage', 'date_acquisition', 'date_assurance', 'date_visite', 'date_creation'
+        ]
+        read_only_fields = ['id', 'date_creation']
+
+
+class BaremeSerializer(serializers.ModelSerializer):
+    """Serializer pour les barèmes kilométriques."""
+
+    class Meta:
+        model = Bareme
+        fields = '__all__'
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Serializer pour les utilisateurs, utilisé notamment pour les chauffeurs."""
+    full_name = serializers.SerializerMethodField()
+    role_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'identifiant', 'email', 'first_name', 'last_name', 'full_name',
+            'role', 'role_display', 'telephone', 'is_active', 'date_joined'
+        ]
+        read_only_fields = ['id', 'date_joined']
+
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}"
+
+    def get_role_display(self, obj):
+        return dict(UserRole.choices).get(obj.role, obj.role)

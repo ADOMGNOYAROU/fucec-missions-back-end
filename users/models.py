@@ -244,3 +244,64 @@ class Entite(models.Model):
         enfants = list(self.enfants.all())
         for enfant in list(enfants):
             enfants.extend(enfant.get_enfants())
+        return enfants
+
+
+class Service(models.Model):
+    """Modèle pour les services/départements."""
+
+    code = models.CharField(
+        _('Code'),
+        max_length=20,
+        unique=True,
+        help_text=_('Code unique du service')
+    )
+
+    nom = models.CharField(
+        _('Nom'),
+        max_length=200,
+        help_text=_('Nom du service')
+    )
+
+    description = models.TextField(
+        _('Description'),
+        blank=True,
+        help_text=_('Description du service')
+    )
+
+    chef = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='services_diriges',
+        verbose_name=_('Chef de service')
+    )
+
+    budget_annuel = models.DecimalField(
+        _('Budget annuel'),
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text=_('Budget annuel alloué en FCFA')
+    )
+
+    actif = models.BooleanField(
+        _('Actif'),
+        default=True,
+        help_text=_('Le service est-il actif ?')
+    )
+
+    date_creation = models.DateTimeField(
+        _('Date de création'),
+        auto_now_add=True
+    )
+
+    class Meta:
+        app_label = 'users'
+        verbose_name = _('Service')
+        verbose_name_plural = _('Services')
+        ordering = ['nom']
+
+    def __str__(self):
+        return f"{self.nom} ({self.code})"

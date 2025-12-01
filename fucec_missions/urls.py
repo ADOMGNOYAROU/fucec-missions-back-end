@@ -16,15 +16,33 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from django.views.generic import RedirectView
 from django.conf import settings
 from django.conf.urls.static import static
 
 urlpatterns = [
+    # Redirige la racine vers l'admin
+    path('', RedirectView.as_view(url='/admin/', permanent=True)),
+    
+    # URLs de l'admin
     path('admin/', admin.site.urls),
-    path('api/users/', include('users.urls')),
-    path('api/missions/', include('missions.urls')),
+    
+    # API URLs
+    path('api/', include([
+        # Users app
+        path('users/', include('users.urls')),
+        
+        # Missions app
+        path('missions/', include('missions.urls')),
+        
+        # Add other API endpoints here
+    ])),
+    
+    # API Auth
+    path('api/auth/', include('rest_framework.urls', namespace='rest_framework')),
 ]
 
-# Servir les fichiers statiques en développement
+# Ajout des URLs pour les fichiers statiques et médias en mode DEBUG
 if settings.DEBUG:
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -12,7 +12,9 @@ from .models_documents import EtatDepenses, Notification, AuditLog
 
 class MissionStatus(models.TextChoices):
     BROUILLON = 'BROUILLON', _('Brouillon')
-    EN_ATTENTE = 'EN_ATTENTE', _('En attente de validation')
+    SOUMIS = 'SOUMIS', _('Soumis au chef de service')
+    VISE_DSI = 'VISE_DSI', _('Visé par le chef de service')
+    VISE_DG = 'VISE_DG', _('Visé par le Directeur Général')
     VALIDEE = 'VALIDEE', _('Validée')
     EN_COURS = 'EN_COURS', _('En cours')
     RETOUR = 'RETOUR', _('Retour déclaré')
@@ -49,6 +51,12 @@ class Mission(models.Model):
         _('Description'),
         blank=True,
         help_text=_('Description détaillée de la mission')
+    )
+
+    objet_mission = models.TextField(
+        _('Objet de la mission'),
+        default='',
+        help_text=_('Objet et objectifs de la mission')
     )
 
     # Type et statut
@@ -89,6 +97,14 @@ class Mission(models.Model):
         _('Lieu de mission'),
         max_length=200,
         help_text=_('Lieu où se déroule la mission')
+    )
+
+    # Moyen de transport
+    moyen_transport = models.CharField(
+        _('Moyen de transport'),
+        max_length=50,
+        default='VOITURE',
+        help_text=_('Moyen de transport utilisé (VOITURE, AVION, etc.)')
     )
 
     # Budget et avances
@@ -256,6 +272,80 @@ class Mission(models.Model):
         _('Date de création'),
         auto_now_add=True
     )
+
+    def creer_workflow_validation(self):
+        """Crée les étapes de validation pour cette mission."""
+        # Supprimer les validations existantes
+        self.validations.all().delete()
+        
+        # Créer les validations en 3 étapes
+        # 1. Validation par le chef de service (N+1)
+        Validation.objects.create(
+            mission=self,
+            niveau=ValidationNiveau.N_PLUS_1,
+            ordre=1,
+            delai_heures=24  # 24h pour le N+1
+        )
+        
+        # 2. Validation par le DSI (N+2)
+        Validation.objects.create(
+            mission=self,
+            niveau=ValidationNiveau.N_PLUS_2,
+            ordre=2,
+            delai_heures=48  # 48h pour le N+2
+        )
+        
+        # 3. Validation par le DG
+        Validation.objects.create(
+            mission=self,
+            niveau=ValidationNiveau.DGA_DG,
+            ordre=3,
+            delai_heures=72  # 72h pour le DG
+        )
+
+    def soumettre_validation(self):
+        """Soumet la mission pour validation par le chef de service."""
+        if self.statut == MissionStatus.BROUILLON:
+            self.statut = MissionStatus.SOUMIS
+            self.date_soumission = timezone.now()
+            self.save()
+            
+            # Créer les étapes de validation
+            self.creer_workflow_validation()
+            
+            # Notifier le premier validateur (chef de service)
+            self.notifier_prochain_validateur()
+            
+            return True
+        return False
+
+    def notifier_prochain_validateur(self):
+        """Notifie le prochain validateur dans la chaîne."""
+        if self.statut == MissionStatus.SOUMIS:
+            # Notifier le chef de service (N+1)
+            validation = self.validations.filter(
+                niveau=ValidationNiveau.N_PLUS_1,
+                statut=ValidationStatus.EN_ATTENTE
+            ).first()
+        elif self.statut == MissionStatus.VISE_DSI:
+            # Notifier le DSI (N+2)
+            validation = self.validations.filter(
+                niveau=ValidationNiveau.N_PLUS_2,
+                statut=ValidationStatus.EN_ATTENTE
+            ).first()
+        elif self.statut == MissionStatus.VISE_DG:
+            # Notifier le DG
+            validation = self.validations.filter(
+                niveau=ValidationNiveau.DGA_DG,
+                statut=ValidationStatus.EN_ATTENTE
+            ).first()
+        else:
+            return
+            
+        if validation:
+            # Ici, vous pouvez ajouter la logique d'envoi de notification
+            # par email ou notification interne
+            pass
 
     class Meta:
         verbose_name = _('Mission')
