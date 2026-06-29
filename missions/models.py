@@ -273,6 +273,13 @@ class Mission(models.Model):
         auto_now_add=True
     )
 
+    def can_be_validated_by(self, user):
+        """Vérifie si l'utilisateur a une validation en attente sur cette mission."""
+        return self.validations.filter(
+            valideur=user,
+            statut=ValidationStatus.EN_ATTENTE
+        ).exists()
+
     def creer_workflow_validation(self):
         """Crée les étapes de validation pour cette mission."""
         # Supprimer les validations existantes

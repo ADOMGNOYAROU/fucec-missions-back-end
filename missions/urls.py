@@ -26,10 +26,13 @@ urlpatterns = [
     path('missions/<int:pk>/submit-justificatifs/', 
          views.MissionSubmitJustificatifsView.as_view(), 
          name='mission-submit-justificatifs'),
-    path('missions/<int:pk>/verify-justificatifs/', 
-         views.JustificatifVerifyView.as_view(), 
+    path('missions/<int:pk>/verify-justificatifs/',
+         views.JustificatifVerifyView.as_view(),
          name='verify-justificatifs'),
-    
+    path('justificatifs/<int:justificatif_id>/validate/<str:decision>/',
+         views.ValidateJustificatifView.as_view(),
+         name='validate-justificatif'),
+
     # Validations
     path('validations/<int:pk>/decide/', views.ValidationDecideView.as_view(), name='validation-decide'),
     

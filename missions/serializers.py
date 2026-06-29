@@ -117,26 +117,16 @@ class ValidationSerializer(serializers.ModelSerializer):
 
     valideur_nom = serializers.CharField(source='valideur.get_full_name', read_only=True)
     mission_titre = serializers.CharField(source='mission.titre', read_only=True)
+    mission_createur_nom = serializers.CharField(source='mission.createur.get_full_name', read_only=True)
 
     class Meta:
         model = Validation
         fields = [
-            'id', 'mission', 'mission_titre', 'valideur', 'valideur_nom',
+            'id', 'mission', 'mission_titre', 'mission_createur_nom', 'valideur', 'valideur_nom',
             'niveau', 'statut', 'commentaire', 'ordre',
             'date_creation', 'date_validation', 'en_retard'
         ]
         read_only_fields = ['id', 'date_creation', 'en_retard']
-
-    def validate(self, data):
-        # Vérifier que l'utilisateur peut valider cette mission
-        request = self.context.get('request')
-        if request and request.user:
-            mission = data.get('mission')
-            if mission and not mission.can_be_validated_by(request.user):
-                raise serializers.ValidationError(
-                    _("Vous n'êtes pas autorisé à valider cette mission.")
-                )
-        return data
 
 
 class JustificatifSerializer(serializers.ModelSerializer):
@@ -150,27 +140,19 @@ class JustificatifSerializer(serializers.ModelSerializer):
         model = Justificatif
         fields = [
             'id', 'mission', 'mission_titre', 'intervenant', 'intervenant_nom',
-            'type', 'categorie', 'description', 'montant', 'montant_formate', 'devise',
+            'type_document', 'categorie', 'description', 'montant', 'montant_formate', 'devise',
             'statut', 'fichier', 'nom_fichier',
             'valideur', 'commentaire_validation',
             'date_creation', 'date_soumission', 'date_validation', 'date_remboursement'
         ]
-        read_only_fields = ['id', 'date_creation', 'montant_formate']
+        # 'intervenant' est toujours défini automatiquement par la vue
+        # (perform_create) à partir de l'utilisateur connecté : le rendre
+        # read-only évite un 400 "champ requis" quand le client ne l'envoie pas,
+        # et supprime le besoin de le revalider ici.
+        read_only_fields = ['id', 'date_creation', 'montant_formate', 'intervenant']
 
     def get_montant_formate(self, obj):
         return obj.montant_formate
-
-    def validate(self, data):
-        # Vérifier que l'utilisateur peut créer des justificatifs pour cette mission
-        request = self.context.get('request')
-        if request and request.user:
-            intervenant = data.get('intervenant')
-            if intervenant != request.user:
-                # Seuls les intervenants peuvent créer leurs propres justificatifs
-                raise serializers.ValidationError(
-                    _("Vous ne pouvez créer des justificatifs que pour vous-même.")
-                )
-        return data
 
 
 class JustificatifValidationSerializer(serializers.ModelSerializer):
@@ -183,7 +165,7 @@ class JustificatifValidationSerializer(serializers.ModelSerializer):
         model = Justificatif
         fields = [
             'id', 'mission', 'mission_titre', 'intervenant', 'intervenant_nom',
-            'type', 'categorie', 'description', 'montant', 'devise',
+            'type_document', 'categorie', 'description', 'montant', 'devise',
             'statut', 'commentaire_validation'
         ]
 

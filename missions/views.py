@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_filters.rest_framework import DjangoFilterBackend
 
-from .models import Mission, Validation, Justificatif
+from .models import Mission, Validation, Justificatif, ValidationStatus, MissionStatus
 from .models_common import TypeMission, TypeFrais
 from .models_missions import Budget, Delegation, RapportFinal, HistoriqueMission, WorkflowValidation
 from .models_vehicules import Vehicule, Bareme
@@ -49,9 +49,8 @@ class MissionListView(generics.ListCreateAPIView):
             return Mission.objects.all()
         elif user.role == 'CHEF_AGENCE':
             # Chefs d'agence voient leurs missions et celles de leurs subordonnés
-            subordinates = user.get_subordinates()
-            subordinate_ids = [sub.id for sub in subordinates]
-            return Mission.objects.filter(
+            subordinate_ids = user.get_subordinates().values_list('id', flat=True)
+            return Mission.objects.select_related('createur', 'entite', 'vehicule', 'chauffeur').filter(
                 models.Q(createur=user) |
                 models.Q(createur__in=subordinate_ids)
             )
@@ -86,9 +85,8 @@ class MissionDetailView(generics.RetrieveUpdateDestroyAPIView):
         if user.role == 'ADMIN' or user.role == 'DG':
             return Mission.objects.all()
         elif user.role == 'CHEF_AGENCE':
-            subordinates = user.get_subordinates()
-            subordinate_ids = [sub.id for sub in subordinates]
-            return Mission.objects.filter(
+            subordinate_ids = user.get_subordinates().values_list('id', flat=True)
+            return Mission.objects.select_related('createur', 'entite', 'vehicule', 'chauffeur').filter(
                 models.Q(createur=user) |
                 models.Q(createur__in=subordinate_ids)
             )
@@ -110,55 +108,23 @@ class ValidationViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return self.queryset
         return self.queryset.filter(
-            models.Q(validateur=user) | 
+            models.Q(valideur=user) |
             models.Q(mission__createur=user)
         ).distinct()
 
     def perform_create(self, serializer):
-        # Définir automatiquement le validateur comme l'utilisateur connecté
-        serializer.save(validateur=self.request.user)
-
-
-class ValidationListView(generics.ListCreateAPIView):
-    """Vue pour lister et créer des validations."""
-
-    serializer_class = ValidationSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['statut', 'niveau', 'mission']
-
-    def get_queryset(self):
-        # Un utilisateur ne peut voir que les validations qui le concernent
-        user = self.request.user
-        if user.is_superuser:
-            return Validation.objects.all()
-        return Validation.objects.filter(
-            models.Q(validateur=user) | 
-            models.Q(mission__createur=user)
-        ).distinct()
-
-    def perform_create(self, serializer):
-        # Définir automatiquement le validateur comme l'utilisateur connecté
-        serializer.save(validateur=self.request.user)
-
-
-class ValidationDetailView(generics.RetrieveUpdateAPIView):
-    """Vue pour récupérer et mettre à jour une validation."""
-
-    serializer_class = ValidationSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        user = self.request.user
-
-        if user.role == 'ADMIN' or user.role == 'DG':
-            return Validation.objects.all()
-        else:
-            return Validation.objects.filter(valideur=user)
+        # Définir automatiquement le valideur comme l'utilisateur connecté
+        serializer.save(valideur=self.request.user)
 
 
 class ValidateMissionView(APIView):
-    """Vue pour valider ou rejeter une mission."""
+    """Vue pour valider ou rejeter une mission.
+
+    Pont vers le workflow réel (Validation + ValidationService) : trouve la
+    validation en attente assignée à l'utilisateur courant pour cette mission
+    et délègue la décision à ValidationService.process_decision, au lieu de
+    manipuler directement un statut 'EN_ATTENTE' qui n'existe plus sur Mission.
+    """
 
     permission_classes = [permissions.IsAuthenticated]
 
@@ -167,48 +133,34 @@ class ValidateMissionView(APIView):
             mission = Mission.objects.get(id=mission_id)
             user = request.user
 
-            # Vérifier que l'utilisateur peut valider cette mission
-            if not mission.can_be_validated_by(user):
+            if decision.upper() in ('VALIDEE', 'VALIDER', 'VALIDE'):
+                decision_normalisee = 'VALIDEE'
+            elif decision.upper() in ('REJETEE', 'REJETTEE', 'REJETER', 'REJETE'):
+                decision_normalisee = 'REJETEE'
+            else:
                 return Response(
-                    {'error': _('Vous n\'êtes pas autorisé à valider cette mission.')},
+                    {'error': _('Décision invalide. Utilisez "validee" ou "rejettee".')},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            validation = mission.validations.filter(
+                valideur=user,
+                statut=ValidationStatus.EN_ATTENTE
+            ).order_by('ordre').first()
+
+            if not validation:
+                return Response(
+                    {'error': _('Vous n\'êtes pas autorisé à valider cette mission ou elle n\'est pas en attente de votre validation.')},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            # Vérifier que la mission est en attente de validation
-            if mission.statut != 'EN_ATTENTE':
-                return Response(
-                    {'error': _('Cette mission n\'est pas en attente de validation.')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            commentaire = request.data.get('commentaire', '')
+            validation = ValidationService.process_decision(validation, decision_normalisee, commentaire)
 
-            # Créer ou mettre à jour la validation
-            validation, created = Validation.objects.get_or_create(
-                mission=mission,
-                valideur=user,
-                defaults={'niveau': user.role}
-            )
-
-            # Mettre à jour la validation
-            if decision.upper() == 'VALIDEE':
-                validation.statut = 'VALIDEE'
-                mission.statut = 'VALIDEE'
-            elif decision.upper() == 'REJETEE':
-                validation.statut = 'REJETEE'
-                mission.statut = 'REJETEE'
-            else:
-                return Response(
-                    {'error': _('Décision invalide. Utilisez "VALIDEE" ou "REJETEE".')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            validation.commentaire = request.data.get('commentaire', '')
-            validation.date_validation = timezone.now()
-            validation.save()
-
-            mission.save()
+            mission.refresh_from_db()
 
             return Response({
-                'message': _(f'Mission {decision.lower()}e avec succès.'),
+                'message': _(f'Mission {decision_normalisee.lower()} avec succès.'),
                 'mission': MissionSerializer(mission, context={'request': request}).data
             })
 
@@ -216,11 +168,6 @@ class ValidateMissionView(APIView):
             return Response(
                 {'error': _('Mission introuvable.')},
                 status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -230,77 +177,28 @@ class JustificatifViewSet(viewsets.ModelViewSet):
     serializer_class = JustificatifSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['statut', 'type', 'mission', 'intervenant']
+    filterset_fields = ['statut', 'type_document', 'mission', 'intervenant']
 
     def get_queryset(self):
         user = self.request.user
+        base = self.queryset.select_related('mission', 'intervenant', 'valideur')
 
         if user.role == 'ADMIN' or user.role == 'DG':
-            return self.queryset
+            return base
         elif user.can_validate:
             # Les validateurs voient les justificatifs de leur équipe
             if user.role == 'CHEF_AGENCE':
-                team_members = [user.id] + [sub.id for sub in user.get_subordinates()]
-                return self.queryset.filter(intervenant__in=team_members)
+                subordinate_ids = user.get_subordinates().values_list('id', flat=True)
+                return base.filter(models.Q(intervenant=user) | models.Q(intervenant__in=subordinate_ids))
             else:
                 # Autres validateurs voient tout
-                return self.queryset
+                return base
         else:
             # Les intervenants voient seulement leurs justificatifs
-            return self.queryset.filter(intervenant=user)
+            return base.filter(intervenant=user)
 
     def perform_create(self, serializer):
         serializer.save(intervenant=self.request.user)
-
-
-class JustificatifListView(generics.ListCreateAPIView):
-    """Vue pour lister et créer des justificatifs."""
-
-    serializer_class = JustificatifSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['statut', 'type', 'mission', 'intervenant']
-
-    def get_queryset(self):
-        user = self.request.user
-
-        if user.role == 'ADMIN' or user.role == 'DG':
-            return Justificatif.objects.all()
-        elif user.can_validate:
-            # Les validateurs voient les justificatifs de leur équipe
-            if user.role == 'CHEF_AGENCE':
-                team_members = [user.id] + [sub.id for sub in user.get_subordinates()]
-                return Justificatif.objects.filter(intervenant__in=team_members)
-            else:
-                # Autres validateurs voient tout
-                return Justificatif.objects.all()
-        else:
-            # Les intervenants voient seulement leurs justificatifs
-            return Justificatif.objects.filter(intervenant=user)
-
-    def perform_create(self, serializer):
-        serializer.save(intervenant=self.request.user)
-
-
-class JustificatifDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Vue pour récupérer, modifier et supprimer un justificatif."""
-
-    serializer_class = JustificatifSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        user = self.request.user
-
-        if user.role == 'ADMIN' or user.role == 'DG':
-            return Justificatif.objects.all()
-        elif user.can_validate:
-            if user.role == 'CHEF_AGENCE':
-                team_members = [user.id] + [sub.id for sub in user.get_subordinates()]
-                return Justificatif.objects.filter(intervenant__in=team_members)
-            else:
-                return Justificatif.objects.all()
-        else:
-            return Justificatif.objects.filter(intervenant=user)
 
 
 class ValidateJustificatifView(APIView):
@@ -353,11 +251,6 @@ class ValidateJustificatifView(APIView):
                 {'error': _('Justificatif introuvable.')},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
 
 @api_view(['GET'])
@@ -370,8 +263,7 @@ def mission_stats(request):
     if user.role == 'ADMIN' or user.role == 'DG':
         missions = Mission.objects.all()
     elif user.role == 'CHEF_AGENCE':
-        subordinates = user.get_subordinates()
-        subordinate_ids = [sub.id for sub in subordinates]
+        subordinate_ids = user.get_subordinates().values_list('id', flat=True)
         missions = Mission.objects.filter(
             models.Q(createur=user) |
             models.Q(createur__in=subordinate_ids)
@@ -381,12 +273,14 @@ def mission_stats(request):
 
     stats = {
         'total': missions.count(),
-        'en_attente': missions.filter(statut='EN_ATTENTE').count(),
-        'validees': missions.filter(statut='VALIDEE').count(),
-        'en_cours': missions.filter(statut='EN_COURS').count(),
-        'cloturees': missions.filter(statut='CLOTUREE').count(),
-        'rejetees': missions.filter(statut='REJETEE').count(),
-        'budget_total': sum(m.budget_prevu for m in missions),
+        'en_attente': missions.filter(statut__in=[
+            MissionStatus.SOUMIS, MissionStatus.VISE_DSI, MissionStatus.VISE_DG
+        ]).count(),
+        'validees': missions.filter(statut=MissionStatus.VALIDEE).count(),
+        'en_cours': missions.filter(statut=MissionStatus.EN_COURS).count(),
+        'cloturees': missions.filter(statut=MissionStatus.CLOTUREE).count(),
+        'rejetees': missions.filter(statut=MissionStatus.REJETEE).count(),
+        'budget_total': missions.aggregate(total=models.Sum('budget_estime'))['total'] or 0,
     }
 
     return Response(stats)
